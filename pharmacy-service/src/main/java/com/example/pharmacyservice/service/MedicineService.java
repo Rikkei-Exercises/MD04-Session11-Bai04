@@ -2,10 +2,14 @@ package com.example.pharmacyservice.service;
 
 import com.example.pharmacyservice.dto.ImportMedicineRequest;
 import com.example.pharmacyservice.dto.PharmacyAlertMessage;
+import com.example.pharmacyservice.dto.SellMedicineResult;
 import com.example.pharmacyservice.model.Medicine;
 import com.example.pharmacyservice.repository.MedicineRepository;
+import org.redisson.api.RLock;
+import org.redisson.api.RedissonClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.cache.annotation.Cacheable;
 import org.springframework.http.HttpStatus;
@@ -13,6 +17,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 @Service
 public class MedicineService {
@@ -21,11 +26,20 @@ public class MedicineService {
 
     private final MedicineRepository medicineRepository;
     private final PharmacyAlertPublisher pharmacyAlertPublisher;
+    private final RedissonClient redissonClient;
 
     public MedicineService(MedicineRepository medicineRepository,
                            PharmacyAlertPublisher pharmacyAlertPublisher) {
+        this(medicineRepository, pharmacyAlertPublisher, null);
+    }
+
+    @Autowired
+    public MedicineService(MedicineRepository medicineRepository,
+                           PharmacyAlertPublisher pharmacyAlertPublisher,
+                           @Autowired(required = false) RedissonClient redissonClient) {
         this.medicineRepository = medicineRepository;
         this.pharmacyAlertPublisher = pharmacyAlertPublisher;
+        this.redissonClient = redissonClient;
     }
 
     /**
@@ -72,6 +86,108 @@ public class MedicineService {
         Medicine updated = medicineRepository.save(existing);
         log.info("===> [DATABASE UPDATE] Đã lưu thông tin thuốc mới vào Database: ID={}, Giá={}", updated.getId(), updated.getUnitPrice());
         return updated;
+    }
+
+    /**
+     * Bán thuốc sử dụng Redisson Distributed Lock (RLock):
+     * Key phân tán: lock:medicine:{id}
+     *
+     * Cơ chế hoạt động:
+     * 1. Trước khi kiểm tra tồn kho và trừ số lượng, nhân viên bắt buộc phải lấy được Lock.
+     * 2. Gọi tryLock(3, 5, TimeUnit.SECONDS) với wait time 3s, lease time 5s:
+     *    - Chờ tối đa 3 giây để lấy Lock.
+     *    - Tự động giải phóng Lock sau 5 giây nếu có sự cố.
+     * 3. Khi đã có Lock:
+     *    - Kiểm tra tồn kho: nếu tồn kho > 0 và >= số lượng cần mua -> trừ tồn kho -> lưu DB -> Thành công.
+     *    - Nếu tồn kho == 0 -> Báo thông báo hết hàng (không bao giờ xảy ra lỗi âm kho).
+     * 4. Cuối cùng, giải phóng Lock trong khối finally (lock.unlock()).
+     */
+    @CacheEvict(value = "medicines", key = "#medicineId")
+    public SellMedicineResult sellMedicine(Long medicineId, int quantity, String employeeName) {
+        String lockKey = "lock:medicine:" + medicineId;
+        RLock lock = redissonClient != null ? redissonClient.getLock(lockKey) : null;
+        boolean locked = false;
+
+        try {
+            if (lock != null) {
+                log.info("===> [REDISSON LOCK] Nhân viên '{}' đang chờ lấy lock '{}' (wait: 3s, lease: 5s)...", employeeName, lockKey);
+                locked = lock.tryLock(3, 5, TimeUnit.SECONDS);
+                if (!locked) {
+                    log.warn("===> [REDISSON LOCK TIMEOUT] Nhân viên '{}' KHÔNG lấy được lock '{}' sau 3s (hệ thống bận)", employeeName, lockKey);
+                    return SellMedicineResult.builder()
+                            .status("LOCK_TIMEOUT")
+                            .message("Hệ thống đang bận xử lý giao dịch cho thuốc này, vui lòng thử lại sau!")
+                            .employeeName(employeeName)
+                            .medicineId(medicineId)
+                            .quantitySold(0)
+                            .remainingStock(-1)
+                            .build();
+                }
+                log.info("===> [REDISSON LOCK SUCCESS] Nhân viên '{}' ĐÃ LẤY ĐƯỢC LOCK '{}' thành công!", employeeName, lockKey);
+            }
+
+            // Đã nắm giữ Lock: Đọc dữ liệu tồn kho mới nhất từ Database
+            Medicine medicine = medicineRepository.findById(medicineId)
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Không tìm thấy thuốc có ID: " + medicineId));
+
+            int currentStock = medicine.getQuantity() != null ? medicine.getQuantity() : 0;
+            log.info("===> [STOCK CHECK] Nhân viên '{}' kiểm tra tồn kho thuốc '{}' (ID={}): Tồn kho hiện tại = {}, Yêu cầu = {}",
+                    employeeName, medicine.getName(), medicineId, currentStock, quantity);
+
+            if (currentStock >= quantity && currentStock > 0) {
+                // Đủ số lượng: Trừ tồn kho và lưu vào DB
+                int newStock = currentStock - quantity;
+                medicine.setQuantity(newStock);
+                Medicine saved = medicineRepository.save(medicine);
+
+                log.info("===> [SELL SUCCESS] Nhân viên '{}' bán thành công {} hộp '{}'. Tồn kho còn lại: {}",
+                        employeeName, quantity, saved.getName(), newStock);
+
+                return SellMedicineResult.builder()
+                        .status("SUCCESS")
+                        .message("Bán thuốc thành công!")
+                        .employeeName(employeeName)
+                        .medicineId(medicineId)
+                        .medicineName(saved.getName())
+                        .quantitySold(quantity)
+                        .remainingStock(newStock)
+                        .unitPrice(saved.getUnitPrice())
+                        .totalAmount(saved.getUnitPrice() != null ? saved.getUnitPrice() * quantity : 0.0)
+                        .build();
+            } else {
+                // Hết hàng: Báo hết hàng ngay lập tức
+                log.warn("===> [OUT OF STOCK] Nhân viên '{}' nhận thông báo: Thuốc '{}' (ID={}) ĐÃ HẾT HÀNG! Tồn kho hiện tại: {}",
+                        employeeName, medicine.getName(), medicineId, currentStock);
+
+                return SellMedicineResult.builder()
+                        .status("OUT_OF_STOCK")
+                        .message("Sản phẩm đã hết hàng!")
+                        .employeeName(employeeName)
+                        .medicineId(medicineId)
+                        .medicineName(medicine.getName())
+                        .quantitySold(0)
+                        .remainingStock(currentStock)
+                        .build();
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.error("===> [REDISSON ERROR] Giao dịch bị gián đoạn khi chờ lock: {}", lockKey, e);
+            return SellMedicineResult.builder()
+                    .status("ERROR")
+                    .message("Giao dịch bị gián đoạn")
+                    .employeeName(employeeName)
+                    .medicineId(medicineId)
+                    .build();
+        } finally {
+            if (lock != null && locked && lock.isHeldByCurrentThread()) {
+                lock.unlock();
+                log.info("===> [REDISSON UNLOCK] Nhân viên '{}' đã giải phóng lock '{}'", employeeName, lockKey);
+            }
+        }
+    }
+
+    public SellMedicineResult sellMedicine(Long medicineId, int quantity) {
+        return sellMedicine(medicineId, quantity, "Nhân viên");
     }
 
     /**

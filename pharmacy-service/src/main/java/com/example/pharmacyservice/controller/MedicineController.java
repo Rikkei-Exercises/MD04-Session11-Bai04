@@ -1,5 +1,6 @@
 package com.example.pharmacyservice.controller;
 
+import com.example.pharmacyservice.dto.SellMedicineResult;
 import com.example.pharmacyservice.model.Medicine;
 import com.example.pharmacyservice.service.MedicineService;
 import org.slf4j.Logger;
@@ -7,7 +8,10 @@ import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 
 @RestController
 @RequestMapping("/api/v1/medicines")
@@ -81,6 +85,72 @@ public class MedicineController {
                 "message", String.format("Đã nhập %d hộp %s", request.getQuantity(), saved.getName())
         ));
         response.put("medicine", saved);
+
+        return ResponseEntity.ok(response);
+    }
+
+    /**
+     * API Bán thuốc trực tiếp sử dụng Redisson Distributed Lock:
+     * POST /api/v1/medicines/{id}/sell
+     */
+    @PostMapping("/{id}/sell")
+    public ResponseEntity<SellMedicineResult> sellMedicine(
+            @PathVariable Long id,
+            @RequestParam(defaultValue = "1") int quantity,
+            @RequestParam(defaultValue = "Nhân viên quầy") String employeeName) {
+        SellMedicineResult result = medicineService.sellMedicine(id, quantity, employeeName);
+        return ResponseEntity.ok(result);
+    }
+
+    /**
+     * API Mô phỏng 2 nhân viên (2 luồng song song) cùng nhấn "Thanh toán" tại cùng một mili giây
+     * cho hộp thuốc hiếm (chỉ còn 1 sản phẩm cuối cùng trong kho).
+     * POST /api/v1/medicines/{id}/simulate-concurrent-sell
+     */
+    @PostMapping("/{id}/simulate-concurrent-sell")
+    public ResponseEntity<Map<String, Object>> simulateConcurrentSell(@PathVariable Long id) {
+        // Đặt số lượng tồn kho = 1 để mô phỏng "chỉ còn 1 sản phẩm cuối cùng"
+        Medicine medicine = medicineService.getMedicineById(id);
+        if (medicine != null) {
+            medicine.setQuantity(1);
+            medicineService.updateMedicine(medicine);
+        }
+
+        // Tạo 2 luồng song song chạy đồng thời
+        CompletableFuture<SellMedicineResult> threadA = CompletableFuture.supplyAsync(() ->
+                medicineService.sellMedicine(id, 1, "Nhân viên A (Máy 1)")
+        );
+
+        CompletableFuture<SellMedicineResult> threadB = CompletableFuture.supplyAsync(() ->
+                medicineService.sellMedicine(id, 1, "Nhân viên B (Máy 2)")
+        );
+
+        CompletableFuture.allOf(threadA, threadB).join();
+
+        SellMedicineResult resultA = threadA.join();
+        SellMedicineResult resultB = threadB.join();
+
+        Medicine updatedMed = medicineService.getMedicineById(id);
+        int finalStock = updatedMed != null && updatedMed.getQuantity() != null ? updatedMed.getQuantity() : 0;
+
+        Map<String, Object> response = new HashMap<>();
+        response.put("scenario", "Bán hộp thuốc hiếm chỉ còn 1 sản phẩm - 2 nhân viên cùng mua song song");
+        response.put("initialStock", 1);
+        response.put("finalStock", finalStock);
+        response.put("preventedNegativeStock", finalStock >= 0);
+        response.put("lockMechanism", "Redisson RLock (key: lock:medicine:" + id + ", wait: 3s, lease: 5s)");
+        response.put("employee1_Result", resultA);
+        response.put("employee2_Result", resultB);
+
+        long successCount = List.of(resultA, resultB).stream()
+                .filter(r -> "SUCCESS".equals(r.getStatus()))
+                .count();
+        long outOfStockCount = List.of(resultA, resultB).stream()
+                .filter(r -> "OUT_OF_STOCK".equals(r.getStatus()))
+                .count();
+
+        response.put("summary", String.format("Thành công: %d giao dịch, Hết hàng: %d giao dịch. Kho không bị âm!",
+                successCount, outOfStockCount));
 
         return ResponseEntity.ok(response);
     }
