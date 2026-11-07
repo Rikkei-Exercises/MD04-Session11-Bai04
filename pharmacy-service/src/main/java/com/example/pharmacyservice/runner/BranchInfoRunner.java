@@ -1,7 +1,9 @@
 package com.example.pharmacyservice.runner;
 
 import com.example.pharmacyservice.model.Medicine;
+import com.example.pharmacyservice.model.Product;
 import com.example.pharmacyservice.repository.MedicineRepository;
+import com.example.pharmacyservice.repository.ProductRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -27,10 +29,12 @@ public class BranchInfoRunner implements CommandLineRunner {
 
     private final DataSource dataSource;
     private final MedicineRepository medicineRepository;
+    private final ProductRepository productRepository;
 
-    public BranchInfoRunner(DataSource dataSource, MedicineRepository medicineRepository) {
+    public BranchInfoRunner(DataSource dataSource, MedicineRepository medicineRepository, ProductRepository productRepository) {
         this.dataSource = dataSource;
         this.medicineRepository = medicineRepository;
+        this.productRepository = productRepository;
     }
 
     @Override
@@ -48,6 +52,24 @@ public class BranchInfoRunner implements CommandLineRunner {
             medicineRepository.save(Medicine.builder().name("Paracetamol 500mg").quantity(100).unitPrice(2500.0).build());
             medicineRepository.save(Medicine.builder().name("Amoxicillin 500mg").quantity(50).unitPrice(5000.0).build());
             medicineRepository.save(Medicine.builder().name("Vitamin C 1000mg").quantity(200).unitPrice(3000.0).build());
+        }
+
+        // Khởi tạo dữ liệu mẫu cho danh mục sản phẩm (product-service)
+        if (productRepository.count() == 0) {
+            productRepository.save(Product.builder()
+                    .name("Máy đo huyết áp điện tử Omron")
+                    .description("Thiết bị y tế gia đình cao cấp, đo huyết áp bắp tay tự động chính xác cao")
+                    .imageUrl("https://cdn.example.com/images/omron-bp.jpg")
+                    .price(850000.0)
+                    .category("Thiết bị y tế")
+                    .build());
+            productRepository.save(Product.builder()
+                    .name("Nhiệt kế hồng ngoại đo trán Microlife")
+                    .description("Đo thân nhiệt nhanh trong 1 giây, cảnh báo sốt thông minh bằng đèn nền")
+                    .imageUrl("https://cdn.example.com/images/microlife-thermometer.jpg")
+                    .price(650000.0)
+                    .category("Thiết bị y tế")
+                    .build());
         }
 
         long totalMedicines = medicineRepository.count();
