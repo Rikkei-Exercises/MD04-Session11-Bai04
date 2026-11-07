@@ -84,4 +84,28 @@ public class PharmacyController {
         Medicine updated = medicineService.updateMedicine(medicine);
         return ResponseEntity.ok(updated);
     }
+
+    /**
+     * API Nhập hàng: POST /api/pharmacy/import
+     * Khi nhập hàng thành công:
+     * - Lưu DB & xóa cache cũ.
+     * - Gửi message Redis Pub/Sub vào channel "pharmacy-alerts":
+     *   { "type": "IMPORT", "message": "Đã nhập 100 hộp Panadol" }
+     */
+    @PostMapping("/import")
+    public ResponseEntity<Map<String, Object>> importMedicine(@RequestBody com.example.pharmacyservice.dto.ImportMedicineRequest request) {
+        Medicine saved = medicineService.importMedicine(request);
+
+        Map<String, Object> response = new HashMap<>();
+        response.put("status", "SUCCESS");
+        response.put("message", "Nhập hàng thành công và đã gửi thông báo Redis Pub/Sub");
+        response.put("channel", "pharmacy-alerts");
+        response.put("alertPayload", Map.of(
+                "type", "IMPORT",
+                "message", String.format("Đã nhập %d hộp %s", request.getQuantity(), saved.getName())
+        ));
+        response.put("medicine", saved);
+
+        return ResponseEntity.ok(response);
+    }
 }

@@ -63,4 +63,25 @@ public class MedicineController {
         Medicine updated = medicineService.updateMedicine(medicine);
         return ResponseEntity.ok(updated);
     }
+
+    /**
+     * API Nhập hàng: POST /api/v1/medicines/import
+     * Phát thông báo JSON vào channel pharmacy-alerts
+     */
+    @PostMapping("/import")
+    public ResponseEntity<java.util.Map<String, Object>> importMedicine(@RequestBody com.example.pharmacyservice.dto.ImportMedicineRequest request) {
+        Medicine saved = medicineService.importMedicine(request);
+
+        java.util.Map<String, Object> response = new java.util.HashMap<>();
+        response.put("status", "SUCCESS");
+        response.put("message", "Nhập hàng thành công và đã gửi thông báo Redis Pub/Sub");
+        response.put("channel", "pharmacy-alerts");
+        response.put("alertPayload", java.util.Map.of(
+                "type", "IMPORT",
+                "message", String.format("Đã nhập %d hộp %s", request.getQuantity(), saved.getName())
+        ));
+        response.put("medicine", saved);
+
+        return ResponseEntity.ok(response);
+    }
 }

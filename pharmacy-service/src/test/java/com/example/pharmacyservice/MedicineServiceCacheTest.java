@@ -4,6 +4,7 @@ import com.example.pharmacyservice.config.RedisConfig;
 import com.example.pharmacyservice.model.Medicine;
 import com.example.pharmacyservice.repository.MedicineRepository;
 import com.example.pharmacyservice.service.MedicineService;
+import com.example.pharmacyservice.service.PharmacyAlertPublisher;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -22,12 +23,16 @@ import static org.mockito.Mockito.*;
 
 @SpringBootTest
 @TestPropertySource(properties = {
-        "spring.cache.type=simple"
+        "spring.cache.type=simple",
+        "spring.redis.pubsub.enabled=false"
 })
 class MedicineServiceCacheTest {
 
     @MockitoBean
     private MedicineRepository medicineRepository;
+
+    @MockitoBean
+    private PharmacyAlertPublisher pharmacyAlertPublisher;
 
     @Autowired
     private MedicineService medicineService;
